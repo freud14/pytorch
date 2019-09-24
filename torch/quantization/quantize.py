@@ -11,8 +11,35 @@ import torch.nn.quantized.dynamic as nnqd
 from .QConfig import default_dynamic_qconfig
 import torch.nn.qat as nnqat
 
+class QuantStub(nn.Module):
+    r"""Quantize stub module, before calibration, this is same as an observer,
+    it will be swapped as `nnq.Quantize` in `convert`.
 
-DEFAULT_SKIP_LIST = [nn.Dropout, nn.Identity, nn.MaxPool2d, nn.AvgPool2d, nn.AdaptiveAvgPool2d]
+    Args:
+        qconfig: quantization configuration for the tensor,
+            if qconfig is not provided, we will get qconfig from parent modules
+    """
+    def __init__(self, qconfig=None):
+        super(QuantStub, self).__init__()
+        if qconfig:
+            self.qconfig = qconfig
+
+    def forward(self, x):
+        return x
+
+class DeQuantStub(nn.Module):
+    r"""Dequantize stub module, before calibration, this is same as identity,
+    this will be swapped as `nnq.DeQuantize` in `convert`.
+    """
+    def __init__(self, qconfig=None):
+        super(DeQuantStub, self).__init__()
+        if qconfig:
+            self.qconfig = qconfig
+
+    def forward(self, x):
+        return x
+
+DEFAULT_SKIP_LIST = [nn.Dropout, nn.Identity, nn.MaxPool2d, nn.AvgPool2d, nn.AdaptiveAvgPool2d, DeQuantStub]
 
 def propagate_qconfig_helper(module, qconfig_dict, skip_list=DEFAULT_SKIP_LIST, qconfig_parent=None, prefix=''):
     r"""This is a helper function for `propagate_qconfig`
@@ -102,8 +129,8 @@ def add_observer(module):
     if hasattr(module, 'qconfig') and module.qconfig is not None and \
        len(module._modules) == 0:
         # observer and hook will be gone after we swap the module
-        module.add_module('observer', module.qconfig.activation())
-        module.register_forward_hook(_observer_forward_hook)
+            module.add_module('observer', module.qconfig.activation())
+            module.register_forward_hook(_observer_forward_hook)
 
 class QuantWrapper(nn.Module):
     r"""A wrapper class that wraps the input module, adds QuantStub and
@@ -165,34 +192,6 @@ def prepare(model):
     """
     propagate_qconfig(model)
     add_observer(model)
-
-class QuantStub(nn.Module):
-    r"""Quantize stub module, before calibration, this is same as an observer,
-    it will be swapped as `nnq.Quantize` in `convert`.
-
-    Args:
-        qconfig: quantization configuration for the tensor,
-            if qconfig is not provided, we will get qconfig from parent modules
-    """
-    def __init__(self, qconfig=None):
-        super(QuantStub, self).__init__()
-        if qconfig:
-            self.qconfig = qconfig
-
-    def forward(self, x):
-        return x
-
-class DeQuantStub(nn.Module):
-    r"""Dequantize stub module, before calibration, this is same as identity,
-    this will be swapped as `nnq.DeQuantize` in `convert`.
-    """
-    def __init__(self, qconfig=None):
-        super(DeQuantStub, self).__init__()
-        if qconfig:
-            self.qconfig = qconfig
-
-    def forward(self, x):
-        return x
 
 # Map for swapping float module to quantized ones
 DEFAULT_MODULE_MAPPING = {
@@ -330,7 +329,8 @@ def swap_module(mod, mapping, dtype=torch.qint8):
         The corresponding quantized module of `mod`
     """
     new_mod = mod
-    if hasattr(mod, 'qconfig') and mod.qconfig is not None:
+    # Always replace dequantstub with dequantize
+    if hasattr(mod, 'qconfig') and mod.qconfig is not None or type(mod) == DeQuantStub:
         if type(mod) in mapping:
             supported_scalar_types = [torch.qint8, torch.float16]
             if dtype not in supported_scalar_types:
